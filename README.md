@@ -1,39 +1,64 @@
-🗺️ Mapping & Heatmap Visualization for potholes 
+# SkySpot
 
-This project uses Leaflet as the primary mapping and geospatial visualization library.
-Leaflet enables real-time drone tracking, pothole detection visualization, and smart-city heatmaps.
+SkySpot is a Flask + Leaflet operations map for road-defect monitoring.
 
-📦 Tech Stack (Mapping)
+## Implemented capabilities
 
-We use open-source mapping tools:
+- Live defect map with `Point`, `LineString`, and `Polygon` geometries.
+- Photo evidence per defect in map popups.
+- Severity categories and confidence scores.
+- Heatmaps:
+  - Density mode
+  - Risk-weighted mode
+- Change-over-time view:
+  - New / worsened / stable / improved counts
+  - Current scan vs previous scan timestamps
+  - Rolling scan window (60s) for live deltas
+  - "New and worsened since last scan" severity breakdown
+- Borough/team ownership and assignment views:
+  - Borough ownership table (total, new+worsened, unassigned, avg risk)
+  - Team assignment table (in-progress, assigned, unassigned)
+- Export and integrations:
+  - GeoJSON export endpoint
+  - CSV export endpoint
+  - WMS-like GeoJSON endpoint with bbox/filter support
 
-Leaflet → interactive map rendering
+## Project structure
 
-React-Leaflet → React integration
+```text
+backend/
+  app.py
+  data.py
+frontend/
+  index.html
+  main.js
+  style.css
+data/
+  neighborhoods.json
+  montreal_boundary.geojson
+```
 
-Leaflet.heat → heatmap visualization
+## Run locally
 
-OpenStreetMap (OSM) → map tiles provider
-
-Code Structure:
-
-├── backend/  
-│   ├── app.py  
-│   └── data.py  
-│  
-├── frontend/  
-│   ├── index.html  
-│   ├── style.css  
-│   └── main.js  
-│  
-├── data/  
-│   └── neighborhoods.json  
-│  
-└── README.md  
- 
- Run it:
-
+1. Install dependencies:
+```bash
 pip install flask
-app.py
-Open http://127.0.0.1:5000
+```
 
+2. Start the server from repository root:
+```bash
+python backend/app.py
+```
+
+3. Open:
+`http://127.0.0.1:5000`
+
+## Key API endpoints
+
+- `GET /api/defects`
+- `GET /api/heatmap?mode=density|risk`
+- `GET /api/defects/changes`
+- `GET /api/views/boroughs-teams`
+- `GET /api/exports/defects.geojson`
+- `GET /api/exports/defects.csv`
+- `GET /api/integrations/wms-like?bbox=minLng,minLat,maxLng,maxLat`

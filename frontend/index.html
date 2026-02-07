@@ -19,27 +19,170 @@
   <main class="layout">
     <section class="panel">
       <h1>SkySpot Ops Map</h1>
-      <p class="subtitle">Real-time drone tracking, pothole points, and smart-city heat intensity.</p>
+      <p class="subtitle">Live defects intelligence with severity, confidence, and assignment controls.</p>
 
-      <div class="stats">
-        <div class="stat">
-          <span class="label">Drones</span>
-          <strong id="droneCount">0</strong>
+      <section class="dashboard" aria-label="Operator dashboard">
+        <h2>Operator Dashboard</h2>
+        <div class="dashboard-grid">
+          <article class="metric-card">
+            <span class="label">Active Drones</span>
+            <strong id="activeDroneCount">0</strong>
+          </article>
+          <article class="metric-card">
+            <span class="label">Defects (Filtered)</span>
+            <strong id="defectCount">0</strong>
+          </article>
+          <article class="metric-card">
+            <span class="label">Critical Defects</span>
+            <strong id="criticalDefectCount">0</strong>
+          </article>
+          <article class="metric-card">
+            <span class="label">New or Worsened</span>
+            <strong id="newWorsenedCount">0</strong>
+          </article>
+          <article class="metric-card">
+            <span class="label">Avg Confidence</span>
+            <strong id="avgConfidence">0.00</strong>
+          </article>
+          <article class="metric-card">
+            <span class="label">In Progress / Assigned</span>
+            <strong id="assignedCount">0</strong>
+          </article>
+          <article class="metric-card">
+            <span class="label">Heat Samples</span>
+            <strong id="heatCount">0</strong>
+          </article>
+          <article class="metric-card">
+            <span class="label">Teams Loaded</span>
+            <strong id="teamCount">0</strong>
+          </article>
         </div>
-        <div class="stat">
-          <span class="label">Potholes</span>
-          <strong id="potholeCount">0</strong>
+        <p id="layerMode" class="layer-mode">Layers: Drones On | Zones On | Defects On | Heat Off</p>
+      </section>
+
+      <section class="change-summary" aria-label="Change summary">
+        <h2>Change Since Last Scan</h2>
+        <p id="scanWindow" class="scan-window">Current scan: -- | Previous scan: --</p>
+        <div class="change-grid">
+          <article class="metric-card metric-compact">
+            <span class="label">New</span>
+            <strong id="changeNewCount">0</strong>
+          </article>
+          <article class="metric-card metric-compact">
+            <span class="label">Worsened</span>
+            <strong id="changeWorsenedCount">0</strong>
+          </article>
+          <article class="metric-card metric-compact">
+            <span class="label">Stable</span>
+            <strong id="changeStableCount">0</strong>
+          </article>
+          <article class="metric-card metric-compact">
+            <span class="label">Improved</span>
+            <strong id="changeImprovedCount">0</strong>
+          </article>
         </div>
-        <div class="stat">
-          <span class="label">Heat Spots</span>
-          <strong id="heatCount">0</strong>
+        <p id="changeScopeSummary" class="change-scope-summary">Scope: all</p>
+        <div id="severityTrend" class="severity-trend" aria-label="New or worsened by severity"></div>
+      </section>
+
+      <section class="ownership-view" aria-label="Borough and team ownership">
+        <h2>Borough and Team Views</h2>
+        <div class="ownership-grid">
+          <article class="ownership-card">
+            <h3>Borough Ownership</h3>
+            <div class="table-wrap">
+              <table class="ownership-table">
+                <thead>
+                  <tr>
+                    <th>Borough</th>
+                    <th>Total</th>
+                    <th>NW</th>
+                    <th>Unassigned</th>
+                    <th>Avg Risk</th>
+                  </tr>
+                </thead>
+                <tbody id="boroughOwnershipBody"></tbody>
+              </table>
+            </div>
+          </article>
+          <article class="ownership-card">
+            <h3>Team Assignment</h3>
+            <div class="table-wrap">
+              <table class="ownership-table">
+                <thead>
+                  <tr>
+                    <th>Team</th>
+                    <th>Total</th>
+                    <th>In Progress</th>
+                    <th>Assigned</th>
+                    <th>Unassigned</th>
+                  </tr>
+                </thead>
+                <tbody id="teamOwnershipBody"></tbody>
+              </table>
+            </div>
+          </article>
         </div>
+      </section>
+
+      <div class="filters">
+        <label class="control-field" for="heatMode">
+          Heatmap Mode
+          <select id="heatMode">
+            <option value="off">Off</option>
+            <option value="density">Density</option>
+            <option value="risk">Risk-Weighted</option>
+          </select>
+        </label>
+        <label class="control-field" for="changeScope">
+          Change Scope
+          <select id="changeScope">
+            <option value="all">All Defects</option>
+            <option value="new_worsened">New + Worsened</option>
+            <option value="new">New Only</option>
+            <option value="worsened">Worsened Only</option>
+          </select>
+        </label>
+        <label class="control-field" for="boroughFilter">
+          Borough
+          <select id="boroughFilter">
+            <option value="all">All Boroughs</option>
+          </select>
+        </label>
+        <label class="control-field" for="teamFilter">
+          Team
+          <select id="teamFilter">
+            <option value="all">All Teams</option>
+          </select>
+        </label>
+        <label class="control-field" for="viewMode">
+          Defect View
+          <select id="viewMode">
+            <option value="severity">Severity</option>
+            <option value="borough">Borough Ownership</option>
+            <option value="team">Team Assignment</option>
+            <option value="assignment">Assignment Status</option>
+          </select>
+        </label>
       </div>
 
       <div class="controls">
-        <button id="toggleHeat" type="button">Hide Heatmap</button>
+        <button id="toggleDrones" type="button">Hide Drones</button>
+        <button id="toggleDroneZones" type="button">Hide Drone Zones</button>
+        <button id="toggleDefects" type="button">Hide Defects</button>
         <button id="refreshData" type="button">Refresh Data</button>
       </div>
+
+      <div class="exports">
+        <a id="exportGeoJson" class="export-link" href="/api/exports/defects.geojson" target="_blank" rel="noopener">Export GeoJSON</a>
+        <a id="exportCsv" class="export-link" href="/api/exports/defects.csv" target="_blank" rel="noopener">Export CSV</a>
+      </div>
+
+      <label class="control-field" for="wmsLikeUrl">
+        WMS-like Integration URL
+        <input id="wmsLikeUrl" type="text" readonly value="/api/integrations/wms-like?bbox={minLng,minLat,maxLng,maxLat}" />
+      </label>
+      <button id="copyWmsUrl" type="button">Copy Integration URL</button>
 
       <p id="status" class="status">Loading map data...</p>
     </section>
