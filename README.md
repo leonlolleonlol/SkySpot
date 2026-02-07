@@ -31,3 +31,9 @@ Code Structure:
 │  
 └── README.md  
  
+ Run it:
+
+pip install flask
+app.py
+Open http://127.0.0.1:5000
+
