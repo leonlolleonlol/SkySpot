@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SkySpot | Mapping and Heatmap</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet" />
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+    crossorigin=""
+  />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <main class="layout">
+    <section class="panel">
+      <h1>SkySpot Ops Map</h1>
+      <p class="subtitle">Real-time drone tracking, pothole points, and smart-city heat intensity.</p>
+
+      <div class="stats">
+        <div class="stat">
+          <span class="label">Drones</span>
+          <strong id="droneCount">0</strong>
+        </div>
+        <div class="stat">
+          <span class="label">Potholes</span>
+          <strong id="potholeCount">0</strong>
+        </div>
+        <div class="stat">
+          <span class="label">Heat Spots</span>
+          <strong id="heatCount">0</strong>
+        </div>
+      </div>
+
+      <div class="controls">
+        <button id="toggleHeat" type="button">Hide Heatmap</button>
+        <button id="refreshData" type="button">Refresh Data</button>
+      </div>
+
+      <p id="status" class="status">Loading map data...</p>
+    </section>
+
+    <section class="map-wrap">
+      <div id="map" aria-label="Map"></div>
+    </section>
+  </main>
+
+  <script
+    src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+    crossorigin=""
+  ></script>
+  <script src="https://unpkg.com/leaflet.heat/dist/leaflet-heat.js"></script>
+  <script src="main.js"></script>
+</body>
+</html>

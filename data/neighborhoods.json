@@ -1,0 +1,59 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Downtown Core"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [-122.425, 37.781],
+            [-122.412, 37.781],
+            [-122.412, 37.771],
+            [-122.425, 37.771],
+            [-122.425, 37.781]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Market Belt"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [-122.436, 37.773],
+            [-122.425, 37.773],
+            [-122.425, 37.764],
+            [-122.436, 37.764],
+            [-122.436, 37.773]
+          ]
+        ]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "name": "Bay Edge"
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [-122.414, 37.779],
+            [-122.402, 37.779],
+            [-122.402, 37.769],
+            [-122.414, 37.769],
+            [-122.414, 37.779]
+          ]
+        ]
+      }
+    }
+  ]
+}

@@ -1,7 +1,7 @@
-🗺️ Mapping & Heatmap Visualization
+🗺️ Mapping & Heatmap Visualization for potholes 
 
 This project uses Leaflet as the primary mapping and geospatial visualization library.
-Leaflet enables real-time drone tracking, pothole detection visualization, and smart-city heatmaps without relying on Google Maps.
+Leaflet enables real-time drone tracking, pothole detection visualization, and smart-city heatmaps.
 
 📦 Tech Stack (Mapping)
 
@@ -16,8 +16,7 @@ Leaflet.heat → heatmap visualization
 OpenStreetMap (OSM) → map tiles provider
 
 Code Structure:
-urban-scan/  
-│  
+
 ├── backend/  
 │   ├── app.py  
 │   └── data.py  

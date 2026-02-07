@@ -1,0 +1,139 @@
+:root {
+  --bg: #f4f7ea;
+  --card: #ffffff;
+  --text: #1c2826;
+  --muted: #566964;
+  --accent: #0d7a5f;
+  --accent-2: #cc5e3d;
+  --border: #d7dfd4;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: "Space Grotesk", "Segoe UI", sans-serif;
+  color: var(--text);
+  background:
+    radial-gradient(circle at 10% 10%, #dce9d8, transparent 30%),
+    radial-gradient(circle at 90% 80%, #f0dbc6, transparent 26%),
+    var(--bg);
+  min-height: 100vh;
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: 340px 1fr;
+  gap: 12px;
+  padding: 12px;
+  min-height: 100vh;
+}
+
+.panel {
+  background: color-mix(in oklab, var(--card), #eaf0e3 20%);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 18px;
+  box-shadow: 0 10px 26px rgba(20, 34, 30, 0.08);
+}
+
+h1 {
+  margin: 0;
+  font-size: 1.55rem;
+  letter-spacing: 0.02em;
+}
+
+.subtitle {
+  margin: 8px 0 18px;
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+.stats {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+}
+
+.stat {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px;
+  background: rgba(255, 255, 255, 0.8);
+}
+
+.label {
+  display: block;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.stat strong {
+  font-size: 1.4rem;
+}
+
+.controls {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+button {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-family: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  background: #fff;
+  color: var(--text);
+  transition: transform 120ms ease, background 120ms ease;
+}
+
+button:hover {
+  transform: translateY(-1px);
+}
+
+button:first-child {
+  background: var(--accent);
+  color: #fff;
+  border-color: transparent;
+}
+
+button:last-child {
+  background: color-mix(in oklab, #fff, var(--accent-2) 12%);
+}
+
+.status {
+  margin-top: 14px;
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+
+.map-wrap {
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  overflow: hidden;
+  min-height: 520px;
+  box-shadow: 0 10px 26px rgba(20, 34, 30, 0.08);
+}
+
+#map {
+  width: 100%;
+  height: 100%;
+  min-height: 520px;
+}
+
+@media (max-width: 960px) {
+  .layout {
+    grid-template-columns: 1fr;
+  }
+
+  .map-wrap,
+  #map {
+    min-height: 62vh;
+  }
+}
