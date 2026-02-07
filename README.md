@@ -16,7 +16,7 @@ Leaflet.heat → heatmap visualization
 OpenStreetMap (OSM) → map tiles provider
 
 Code Structure:
-urban-scan/
+urban-scan/  
 │  
 ├── backend/  
 │   ├── app.py  
