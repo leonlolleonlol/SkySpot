@@ -17,17 +17,18 @@ OpenStreetMap (OSM) → map tiles provider
 
 Code Structure:
 urban-scan/
-│
-├── backend/
-│   ├── app.py
-│   └── data.py
-│
-├── frontend/
-│   ├── index.html
-│   ├── style.css
-│   └── main.js
-│
-├── data/
-│   └── neighborhoods.json
-│
-└── README.md
+│  
+├── backend/  
+│   ├── app.py  
+│   └── data.py  
+│  
+├── frontend/  
+│   ├── index.html  
+│   ├── style.css  
+│   └── main.js  
+│  
+├── data/  
+│   └── neighborhoods.json  
+│  
+└── README.md  
+ 
