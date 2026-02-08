@@ -2,18 +2,32 @@ from pathlib import Path
 
 from flask import Flask, Response, jsonify, request, send_from_directory
 
-from data import (
-    get_borough_team_view,
-    get_defect_changes_summary,
-    get_defects,
-    get_defects_csv,
-    get_defects_geojson,
-    get_drones,
-    get_heatmap_points,
-    get_neighborhoods,
-    get_potholes,
-    get_wms_like_features,
-)
+try:
+    from .data import (
+        get_borough_team_view,
+        get_defect_changes_summary,
+        get_defects,
+        get_defects_csv,
+        get_defects_geojson,
+        get_drones,
+        get_heatmap_points,
+        get_neighborhoods,
+        get_potholes,
+        get_wms_like_features,
+    )
+except ImportError:
+    from data import (
+        get_borough_team_view,
+        get_defect_changes_summary,
+        get_defects,
+        get_defects_csv,
+        get_defects_geojson,
+        get_drones,
+        get_heatmap_points,
+        get_neighborhoods,
+        get_potholes,
+        get_wms_like_features,
+    )
 
 BASE_DIR = Path(__file__).resolve().parent
 FRONTEND_DIR = BASE_DIR.parent / "frontend"
