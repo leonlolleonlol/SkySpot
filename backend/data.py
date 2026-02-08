@@ -3,6 +3,10 @@ import math
 import csv
 import hashlib
 import random
+import os
+import urllib.error
+import urllib.request
+import time
 from io import StringIO
 from pathlib import Path
 from datetime import datetime, timezone
@@ -11,6 +15,8 @@ from typing import Dict, List, Optional, Sequence, Tuple
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 NEIGHBORHOODS_PATH = DATA_DIR / "neighborhoods.json"
 MONTREAL_BOUNDARY_PATH = DATA_DIR / "montreal_boundary.geojson"
+LOCAL_ROADS_GEOJSON_PATH = DATA_DIR / "roads.geojson"
+OSM_ROADS_CACHE_PATH = DATA_DIR / "montreal_roads_overpass.json"
 EARTH_RADIUS_M = 6_371_000.0
 DRONE_COVERAGE_KM2 = 10.0
 DRONE_COVERAGE_M2 = DRONE_COVERAGE_KM2 * 1_000_000.0
@@ -20,6 +26,17 @@ MONTREAL_REF_LAT = 45.5017
 MONTREAL_REF_LNG = -73.5673
 EPSILON = 1e-9
 SCAN_WINDOW_SECONDS = 60
+ROAD_GRAPH_GRID_SIZE_M = 350.0
+OSM_ROAD_CACHE_MAX_AGE_SECONDS = 14 * 24 * 60 * 60
+OVERPASS_TIMEOUT_SECONDS = 8
+OSM_DOWNLOAD_RETRY_COOLDOWN_SECONDS = 6 * 60 * 60
+OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+ALLOW_OVERPASS_DOWNLOAD = os.environ.get("SKYSPOT_ENABLE_OVERPASS", "0").strip() in {"1", "true", "yes"}
+HEAT_GRID_SPACING_M = 900.0
+HEAT_BASE_INTENSITY_DENSITY = 0.34
+HEAT_BASE_INTENSITY_RISK = 0.30
+HEAT_SIGMA_M_DENSITY = 2800.0
+HEAT_SIGMA_M_RISK = 2400.0
 
 LatLng = Tuple[float, float]
 XY = Tuple[float, float]
@@ -34,6 +51,16 @@ _DEFECT_CACHE: Dict[str, object] = {
     "previous_scan_time": None,
 }
 _REGION_SAMPLE_CACHE: Dict[str, object] = {"signature": None, "shapes": []}
+_ROAD_GRAPH_CACHE: Dict[str, object] = {
+    "signature": None,
+    "graph": None,
+    "last_download_attempt_s": 0.0,
+}
+_HEAT_GRID_CACHE: Dict[str, object] = {
+    "signature": None,
+    "spacing_m": None,
+    "points_xy": [],
+}
 
 SEVERITY_LEVELS = ("low", "medium", "high", "critical")
 SEVERITY_WEIGHTS = {"low": 1.0, "medium": 2.0, "high": 3.0, "critical": 4.0}
@@ -55,7 +82,7 @@ ASSIGNEES = (
 POINT_DEFECT_TYPES = ("pothole",)
 LINE_DEFECT_TYPES = ("longitudinal-crack", "alligator-crack", "rutting")
 POLYGON_DEFECT_TYPES = ("surface-break", "patch-failure", "deformation-zone")
-DEFECTS_PER_DRONE = 2
+DEFECTS_PER_DRONE = 4
 POTHOLE_SAMPLE_LIMIT = 40
 
 
@@ -337,13 +364,25 @@ def _generate_hex_cells() -> List[Dict[str, object]]:
                     if center_owner is None and _point_in_polygon(center_xy, polygon_xy):
                         center_owner = shape
 
+            if not intersecting_shapes:
+                x += col_step
+                continue
+
             assigned_shape = center_owner
             if assigned_shape is None:
-                assignment_pool = intersecting_shapes if intersecting_shapes else shapes
                 assigned_shape = min(
-                    assignment_pool,
+                    intersecting_shapes,
                     key=lambda shape: _distance_xy(center_xy, shape["centroid_xy"]),
                 )
+
+            anchor_rng = _seeded_rng("cell-anchor", assigned_shape["name"], row_index, x, y)
+            center_xy = _sample_point_in_polygon_overlap_xy(
+                primary_polygon_xy=hex_xy,
+                primary_bbox=hex_bbox,
+                secondary_polygon_xy=assigned_shape["polygon_xy"],
+                secondary_bbox=assigned_shape["bbox"],
+                rng=anchor_rng,
+            )
 
             center_latlng = _xy_to_latlng(
                 center_xy[0], center_xy[1], MONTREAL_REF_LAT, MONTREAL_REF_LNG
@@ -374,8 +413,12 @@ def _mtime_ns(path: Path) -> int:
     return path.stat().st_mtime_ns
 
 
-def _coverage_signature() -> Tuple[int, int]:
-    return (_mtime_ns(NEIGHBORHOODS_PATH), _mtime_ns(MONTREAL_BOUNDARY_PATH))
+def _coverage_signature() -> Tuple[int, int, int]:
+    return (
+        _mtime_ns(NEIGHBORHOODS_PATH),
+        _mtime_ns(MONTREAL_BOUNDARY_PATH),
+        max(_mtime_ns(OSM_ROADS_CACHE_PATH), _mtime_ns(LOCAL_ROADS_GEOJSON_PATH)),
+    )
 
 
 def _scan_key(now: Optional[datetime] = None) -> int:
@@ -434,6 +477,619 @@ def _sample_point_in_polygon_xy(
     return _centroid_xy(polygon_xy)
 
 
+def _sample_point_in_polygon_overlap_xy(
+    primary_polygon_xy: Sequence[XY],
+    primary_bbox: BBox,
+    secondary_polygon_xy: Sequence[XY],
+    secondary_bbox: BBox,
+    rng: random.Random,
+    max_attempts: int = 320,
+) -> XY:
+    overlap_bbox = (
+        max(primary_bbox[0], secondary_bbox[0]),
+        max(primary_bbox[1], secondary_bbox[1]),
+        min(primary_bbox[2], secondary_bbox[2]),
+        min(primary_bbox[3], secondary_bbox[3]),
+    )
+
+    if overlap_bbox[0] > overlap_bbox[2] or overlap_bbox[1] > overlap_bbox[3]:
+        return _sample_point_in_polygon_xy(primary_polygon_xy, primary_bbox, rng)
+
+    for _ in range(max_attempts):
+        x = rng.uniform(overlap_bbox[0], overlap_bbox[2])
+        y = rng.uniform(overlap_bbox[1], overlap_bbox[3])
+        point = (x, y)
+        if _point_in_polygon(point, primary_polygon_xy) and _point_in_polygon(
+            point, secondary_polygon_xy
+        ):
+            return point
+
+    primary_centroid = _centroid_xy(primary_polygon_xy)
+    if _point_in_polygon(primary_centroid, secondary_polygon_xy):
+        return primary_centroid
+
+    secondary_centroid = _centroid_xy(secondary_polygon_xy)
+    if _point_in_polygon(secondary_centroid, primary_polygon_xy):
+        return secondary_centroid
+
+    for candidate in primary_polygon_xy:
+        if _point_in_polygon(candidate, secondary_polygon_xy):
+            return candidate
+    for candidate in secondary_polygon_xy:
+        if _point_in_polygon(candidate, primary_polygon_xy):
+            return candidate
+
+    return _sample_point_in_polygon_xy(primary_polygon_xy, primary_bbox, rng)
+
+
+def _collect_geojson_bbox(geojson: Dict[str, object]) -> Optional[Tuple[float, float, float, float]]:
+    min_lat = float("inf")
+    min_lng = float("inf")
+    max_lat = float("-inf")
+    max_lng = float("-inf")
+
+    for feature in geojson.get("features", []):
+        if not isinstance(feature, dict):
+            continue
+        geometry = feature.get("geometry", {})
+        if not isinstance(geometry, dict):
+            continue
+        for polygon in _polygons_from_geometry(geometry):
+            for lat, lng in polygon:
+                min_lat = min(min_lat, lat)
+                min_lng = min(min_lng, lng)
+                max_lat = max(max_lat, lat)
+                max_lng = max(max_lng, lng)
+
+    if min_lat == float("inf"):
+        return None
+    return (min_lat, min_lng, max_lat, max_lng)
+
+
+def _city_bbox_latlng() -> Tuple[float, float, float, float]:
+    boundary_bbox: Optional[Tuple[float, float, float, float]] = None
+    if MONTREAL_BOUNDARY_PATH.exists():
+        try:
+            with MONTREAL_BOUNDARY_PATH.open("r", encoding="utf-8-sig") as file:
+                boundary_geojson = json.load(file)
+            if isinstance(boundary_geojson, dict):
+                boundary_bbox = _collect_geojson_bbox(boundary_geojson)
+        except (OSError, json.JSONDecodeError):
+            boundary_bbox = None
+
+    if boundary_bbox is None:
+        neighborhoods_geojson = get_neighborhoods()
+        boundary_bbox = _collect_geojson_bbox(neighborhoods_geojson)
+
+    if boundary_bbox is None:
+        boundary_bbox = (45.3500, -73.9600, 45.7100, -73.4200)
+
+    padding_deg = 0.01
+    return (
+        boundary_bbox[0] - padding_deg,
+        boundary_bbox[1] - padding_deg,
+        boundary_bbox[2] + padding_deg,
+        boundary_bbox[3] + padding_deg,
+    )
+
+
+def _overpass_query_for_bbox(south: float, west: float, north: float, east: float) -> str:
+    drivable_filter = (
+        "motorway|motorway_link|trunk|trunk_link|primary|primary_link|secondary|"
+        "secondary_link|tertiary|tertiary_link|unclassified|residential|service|"
+        "living_street|road"
+    )
+    return (
+        "[out:json][timeout:90];\n"
+        "(\n"
+        f'  way["highway"~"{drivable_filter}"]({south:.6f},{west:.6f},{north:.6f},{east:.6f});\n'
+        ");\n"
+        "(._;>;);\n"
+        "out body;\n"
+    )
+
+
+def _read_osm_roads_cache() -> Optional[Dict[str, object]]:
+    if not OSM_ROADS_CACHE_PATH.exists():
+        return None
+    try:
+        with OSM_ROADS_CACHE_PATH.open("r", encoding="utf-8") as file:
+            payload = json.load(file)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    if isinstance(payload, dict) and isinstance(payload.get("elements"), list):
+        return payload
+    return None
+
+
+def _write_osm_roads_cache(payload: Dict[str, object]) -> None:
+    try:
+        OSM_ROADS_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with OSM_ROADS_CACHE_PATH.open("w", encoding="utf-8") as file:
+            json.dump(payload, file)
+    except OSError:
+        return
+
+
+def _download_osm_roads_payload() -> Optional[Dict[str, object]]:
+    south, west, north, east = _city_bbox_latlng()
+    query = _overpass_query_for_bbox(south, west, north, east)
+    request = urllib.request.Request(
+        OVERPASS_URL,
+        data=query.encode("utf-8"),
+        headers={"User-Agent": "SkySpot/1.0"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=OVERPASS_TIMEOUT_SECONDS) as response:
+            body = response.read().decode("utf-8")
+        payload = json.loads(body)
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError):
+        return None
+
+    if not isinstance(payload, dict):
+        return None
+    if not isinstance(payload.get("elements"), list):
+        return None
+    return payload
+
+
+def _assemble_road_graph(nodes_xy: Dict[int, XY], adjacency: Dict[int, List[Tuple[int, float]]]) -> Optional[Dict[str, object]]:
+    if not adjacency:
+        return None
+
+    connected_node_ids = set(adjacency.keys())
+    for edges in adjacency.values():
+        for neighbor_id, _ in edges:
+            connected_node_ids.add(neighbor_id)
+
+    connected_nodes_xy: Dict[int, XY] = {
+        node_id: nodes_xy[node_id]
+        for node_id in connected_node_ids
+        if node_id in nodes_xy
+    }
+    if not connected_nodes_xy:
+        return None
+
+    grid: Dict[Tuple[int, int], List[int]] = {}
+    for node_id, node_xy in connected_nodes_xy.items():
+        cell = (
+            int(math.floor(node_xy[0] / ROAD_GRAPH_GRID_SIZE_M)),
+            int(math.floor(node_xy[1] / ROAD_GRAPH_GRID_SIZE_M)),
+        )
+        grid.setdefault(cell, []).append(node_id)
+
+    graph_bbox = _bbox_for_points(list(connected_nodes_xy.values()))
+    return {
+        "nodes_xy": connected_nodes_xy,
+        "adjacency": adjacency,
+        "grid": grid,
+        "grid_size_m": ROAD_GRAPH_GRID_SIZE_M,
+        "bbox": graph_bbox,
+    }
+
+
+def _build_road_graph_from_geojson(geojson: Dict[str, object]) -> Optional[Dict[str, object]]:
+    features = geojson.get("features", [])
+    if not isinstance(features, list):
+        return None
+
+    node_id_by_coord: Dict[Tuple[int, int], int] = {}
+    nodes_xy: Dict[int, XY] = {}
+    adjacency: Dict[int, List[Tuple[int, float]]] = {}
+    next_node_id = 1
+
+    def _node_id_for_latlng(lat: float, lng: float) -> int:
+        nonlocal next_node_id
+        key = (int(round(lat * 10_000_000)), int(round(lng * 10_000_000)))
+        existing = node_id_by_coord.get(key)
+        if existing is not None:
+            return existing
+        node_id = next_node_id
+        next_node_id += 1
+        node_id_by_coord[key] = node_id
+        nodes_xy[node_id] = _latlng_to_xy(lat, lng, MONTREAL_REF_LAT, MONTREAL_REF_LNG)
+        return node_id
+
+    def _add_edge(start_node_id: int, end_node_id: int, distance_m: float) -> None:
+        adjacency.setdefault(start_node_id, []).append((end_node_id, distance_m))
+
+    for feature in features:
+        if not isinstance(feature, dict):
+            continue
+        geometry = feature.get("geometry", {})
+        if not isinstance(geometry, dict):
+            continue
+        geometry_type = str(geometry.get("type"))
+        coordinates = geometry.get("coordinates", [])
+        if not isinstance(coordinates, list):
+            continue
+
+        lines: List[List[Sequence[float]]] = []
+        if geometry_type == "LineString":
+            lines = [coordinates]
+        elif geometry_type == "MultiLineString":
+            lines = [line for line in coordinates if isinstance(line, list)]
+
+        for line in lines:
+            if len(line) < 2:
+                continue
+            for index in range(len(line) - 1):
+                start = line[index]
+                end = line[index + 1]
+                if (
+                    not isinstance(start, (list, tuple))
+                    or not isinstance(end, (list, tuple))
+                    or len(start) < 2
+                    or len(end) < 2
+                ):
+                    continue
+                start_lng = start[0]
+                start_lat = start[1]
+                end_lng = end[0]
+                end_lat = end[1]
+                if not isinstance(start_lat, (int, float)) or not isinstance(start_lng, (int, float)):
+                    continue
+                if not isinstance(end_lat, (int, float)) or not isinstance(end_lng, (int, float)):
+                    continue
+
+                start_node_id = _node_id_for_latlng(float(start_lat), float(start_lng))
+                end_node_id = _node_id_for_latlng(float(end_lat), float(end_lng))
+                segment_length_m = _distance_xy(nodes_xy[start_node_id], nodes_xy[end_node_id])
+                if segment_length_m <= EPSILON:
+                    continue
+                _add_edge(start_node_id, end_node_id, segment_length_m)
+                _add_edge(end_node_id, start_node_id, segment_length_m)
+
+    return _assemble_road_graph(nodes_xy, adjacency)
+
+
+def _build_road_graph_from_osm_payload(payload: Dict[str, object]) -> Optional[Dict[str, object]]:
+    elements = payload.get("elements", [])
+    if not isinstance(elements, list):
+        return None
+
+    node_latlng: Dict[int, LatLng] = {}
+    ways: List[Tuple[List[int], str]] = []
+
+    for element in elements:
+        if not isinstance(element, dict):
+            continue
+        element_type = element.get("type")
+        if element_type == "node":
+            node_id = element.get("id")
+            lat = element.get("lat")
+            lng = element.get("lon")
+            if not isinstance(node_id, int):
+                continue
+            if not isinstance(lat, (int, float)) or not isinstance(lng, (int, float)):
+                continue
+            node_latlng[node_id] = (float(lat), float(lng))
+            continue
+
+        if element_type != "way":
+            continue
+
+        tags = element.get("tags", {})
+        if not isinstance(tags, dict):
+            continue
+        highway = tags.get("highway")
+        if not highway:
+            continue
+        node_ids = element.get("nodes", [])
+        if not isinstance(node_ids, list) or len(node_ids) < 2:
+            continue
+        valid_nodes = [node_id for node_id in node_ids if isinstance(node_id, int)]
+        if len(valid_nodes) < 2:
+            continue
+        oneway = str(tags.get("oneway", "")).strip().lower()
+        ways.append((valid_nodes, oneway))
+
+    if not node_latlng or not ways:
+        return None
+
+    nodes_xy: Dict[int, XY] = {}
+    adjacency: Dict[int, List[Tuple[int, float]]] = {}
+
+    def _node_xy(node_id: int) -> Optional[XY]:
+        if node_id in nodes_xy:
+            return nodes_xy[node_id]
+        node_latlng_value = node_latlng.get(node_id)
+        if node_latlng_value is None:
+            return None
+        node_xy = _latlng_to_xy(
+            node_latlng_value[0],
+            node_latlng_value[1],
+            MONTREAL_REF_LAT,
+            MONTREAL_REF_LNG,
+        )
+        nodes_xy[node_id] = node_xy
+        return node_xy
+
+    def _add_edge(start_id: int, end_id: int, distance_m: float) -> None:
+        adjacency.setdefault(start_id, []).append((end_id, distance_m))
+
+    for node_ids, oneway in ways:
+        for index in range(len(node_ids) - 1):
+            start_id = node_ids[index]
+            end_id = node_ids[index + 1]
+            start_xy = _node_xy(start_id)
+            end_xy = _node_xy(end_id)
+            if start_xy is None or end_xy is None:
+                continue
+            segment_length_m = _distance_xy(start_xy, end_xy)
+            if segment_length_m <= EPSILON:
+                continue
+
+            if oneway in {"yes", "1", "true"}:
+                _add_edge(start_id, end_id, segment_length_m)
+            elif oneway == "-1":
+                _add_edge(end_id, start_id, segment_length_m)
+            else:
+                _add_edge(start_id, end_id, segment_length_m)
+                _add_edge(end_id, start_id, segment_length_m)
+
+    return _assemble_road_graph(nodes_xy, adjacency)
+
+
+def _read_local_roads_geojson() -> Optional[Dict[str, object]]:
+    if not LOCAL_ROADS_GEOJSON_PATH.exists():
+        return None
+    try:
+        with LOCAL_ROADS_GEOJSON_PATH.open("r", encoding="utf-8-sig") as file:
+            geojson = json.load(file)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    if not isinstance(geojson, dict):
+        return None
+    if str(geojson.get("type")) != "FeatureCollection":
+        return None
+    if not isinstance(geojson.get("features"), list):
+        return None
+    return geojson
+
+
+def _road_graph_signature() -> Tuple[int, int, int]:
+    return (
+        _mtime_ns(NEIGHBORHOODS_PATH),
+        _mtime_ns(MONTREAL_BOUNDARY_PATH),
+        max(_mtime_ns(OSM_ROADS_CACHE_PATH), _mtime_ns(LOCAL_ROADS_GEOJSON_PATH)),
+    )
+
+
+def _get_osm_road_graph() -> Optional[Dict[str, object]]:
+    signature = _road_graph_signature()
+    if _ROAD_GRAPH_CACHE["signature"] == signature:
+        return _ROAD_GRAPH_CACHE["graph"]  # type: ignore[return-value]
+
+    local_roads_geojson = _read_local_roads_geojson()
+    if local_roads_geojson is not None:
+        graph_from_local = _build_road_graph_from_geojson(local_roads_geojson)
+        if graph_from_local is not None:
+            _ROAD_GRAPH_CACHE["signature"] = signature
+            _ROAD_GRAPH_CACHE["graph"] = graph_from_local
+            return graph_from_local
+
+    payload = _read_osm_roads_cache()
+    cache_stale = False
+    if OSM_ROADS_CACHE_PATH.exists():
+        try:
+            cache_age_seconds = max(0.0, time.time() - OSM_ROADS_CACHE_PATH.stat().st_mtime)
+            cache_stale = cache_age_seconds > OSM_ROAD_CACHE_MAX_AGE_SECONDS
+        except OSError:
+            cache_stale = False
+
+    if payload is None or cache_stale:
+        if not ALLOW_OVERPASS_DOWNLOAD:
+            if payload is None:
+                _ROAD_GRAPH_CACHE["signature"] = signature
+                _ROAD_GRAPH_CACHE["graph"] = None
+                return None
+        else:
+            now_s = time.time()
+            last_attempt_s = float(_ROAD_GRAPH_CACHE.get("last_download_attempt_s", 0.0))
+            if (now_s - last_attempt_s) >= OSM_DOWNLOAD_RETRY_COOLDOWN_SECONDS:
+                _ROAD_GRAPH_CACHE["last_download_attempt_s"] = now_s
+                downloaded = _download_osm_roads_payload()
+                if downloaded is not None and downloaded.get("elements"):
+                    _write_osm_roads_cache(downloaded)
+                    payload = downloaded
+
+    if payload is None:
+        _ROAD_GRAPH_CACHE["signature"] = signature
+        _ROAD_GRAPH_CACHE["graph"] = None
+        return None
+
+    graph = _build_road_graph_from_osm_payload(payload)
+    if graph is None:
+        _ROAD_GRAPH_CACHE["signature"] = signature
+        _ROAD_GRAPH_CACHE["graph"] = None
+        return None
+
+    _ROAD_GRAPH_CACHE["signature"] = _road_graph_signature()
+    _ROAD_GRAPH_CACHE["graph"] = graph
+    return graph
+
+
+def _graph_nodes_in_bbox(graph: Dict[str, object], bbox: BBox, padding_m: float = 0.0) -> List[int]:
+    graph_bbox = graph.get("bbox")
+    if not isinstance(graph_bbox, tuple) or len(graph_bbox) != 4:
+        return []
+    padded_bbox = (
+        bbox[0] - padding_m,
+        bbox[1] - padding_m,
+        bbox[2] + padding_m,
+        bbox[3] + padding_m,
+    )
+    if not _bboxes_overlap(padded_bbox, graph_bbox):
+        return []
+
+    grid = graph.get("grid")
+    grid_size = float(graph.get("grid_size_m", ROAD_GRAPH_GRID_SIZE_M))
+    if not isinstance(grid, dict) or grid_size <= 0:
+        return []
+
+    min_cell_x = int(math.floor(padded_bbox[0] / grid_size))
+    max_cell_x = int(math.floor(padded_bbox[2] / grid_size))
+    min_cell_y = int(math.floor(padded_bbox[1] / grid_size))
+    max_cell_y = int(math.floor(padded_bbox[3] / grid_size))
+
+    node_ids: List[int] = []
+    for cell_x in range(min_cell_x, max_cell_x + 1):
+        for cell_y in range(min_cell_y, max_cell_y + 1):
+            node_ids.extend(grid.get((cell_x, cell_y), []))
+    return node_ids
+
+
+def _nearest_node(node_ids: Sequence[int], nodes_xy: Dict[int, XY], target_xy: XY) -> Optional[int]:
+    if not node_ids:
+        return None
+    best_id: Optional[int] = None
+    best_distance = float("inf")
+    for node_id in node_ids:
+        node_xy = nodes_xy.get(node_id)
+        if node_xy is None:
+            continue
+        distance_m = _distance_xy(node_xy, target_xy)
+        if distance_m < best_distance:
+            best_distance = distance_m
+            best_id = node_id
+    return best_id
+
+
+def _build_patrol_route_from_osm_xy(
+    coverage_polygon_xy: Sequence[XY],
+    drone_id: str,
+    preferred_center_xy: Optional[XY] = None,
+) -> List[XY]:
+    graph = _get_osm_road_graph()
+    if graph is None:
+        return []
+
+    nodes_xy = graph.get("nodes_xy")
+    adjacency = graph.get("adjacency")
+    if not isinstance(nodes_xy, dict) or not isinstance(adjacency, dict):
+        return []
+
+    coverage_bbox = _bbox_for_points(coverage_polygon_xy)
+    candidate_node_ids = _graph_nodes_in_bbox(graph, coverage_bbox, padding_m=180.0)
+    if not candidate_node_ids:
+        return []
+
+    inside_node_ids = [
+        node_id
+        for node_id in candidate_node_ids
+        if node_id in nodes_xy and _point_in_polygon(nodes_xy[node_id], coverage_polygon_xy)
+    ]
+    usable_node_ids = inside_node_ids if len(inside_node_ids) >= 6 else candidate_node_ids
+    if len(usable_node_ids) < 2:
+        return []
+
+    usable_node_set = set(usable_node_ids)
+    candidate_node_set = set(candidate_node_ids)
+
+    center_xy = preferred_center_xy
+    if center_xy is None:
+        center_xy = _centroid_xy(coverage_polygon_xy)
+
+    start_node_id = _nearest_node(usable_node_ids, nodes_xy, center_xy)
+    if start_node_id is None:
+        return []
+
+    rng = _seeded_rng("road-route-osm", drone_id)
+    target_length_m = 700.0 + rng.uniform(0.0, 900.0)
+    route_node_ids: List[int] = [start_node_id]
+    recent_nodes: List[int] = [start_node_id]
+    traversed_edges = set()
+    traversed_length_m = 0.0
+
+    for _ in range(240):
+        current_node_id = route_node_ids[-1]
+        neighbor_edges = adjacency.get(current_node_id, [])
+        if not isinstance(neighbor_edges, list) or not neighbor_edges:
+            break
+
+        local_neighbors = [
+            (neighbor_id, float(distance_m))
+            for neighbor_id, distance_m in neighbor_edges
+            if isinstance(neighbor_id, int)
+            and neighbor_id in usable_node_set
+            and isinstance(distance_m, (int, float))
+            and float(distance_m) > EPSILON
+        ]
+        if not local_neighbors:
+            local_neighbors = [
+                (neighbor_id, float(distance_m))
+                for neighbor_id, distance_m in neighbor_edges
+                if isinstance(neighbor_id, int)
+                and neighbor_id in candidate_node_set
+                and isinstance(distance_m, (int, float))
+                and float(distance_m) > EPSILON
+            ]
+        if not local_neighbors:
+            break
+
+        if len(route_node_ids) >= 2 and len(local_neighbors) > 1:
+            previous_node_id = route_node_ids[-2]
+            non_backtracking = [
+                edge for edge in local_neighbors if edge[0] != previous_node_id
+            ]
+            if non_backtracking:
+                local_neighbors = non_backtracking
+
+        weighted_neighbors: List[Tuple[int, float, float]] = []
+        for neighbor_id, distance_m in local_neighbors:
+            edge_key = (
+                min(current_node_id, neighbor_id),
+                max(current_node_id, neighbor_id),
+            )
+            novelty_weight = 0.55 if edge_key in traversed_edges else 1.0
+            recency_weight = 0.7 if neighbor_id in recent_nodes else 1.0
+            distance_weight = 1.0 + min(220.0, distance_m) / 220.0
+            weight = max(0.001, novelty_weight * recency_weight * distance_weight)
+            weighted_neighbors.append((neighbor_id, distance_m, weight))
+
+        total_weight = sum(item[2] for item in weighted_neighbors)
+        pick = rng.uniform(0.0, total_weight)
+        cumulative = 0.0
+        chosen_neighbor = weighted_neighbors[-1]
+        for item in weighted_neighbors:
+            cumulative += item[2]
+            if pick <= cumulative:
+                chosen_neighbor = item
+                break
+
+        next_node_id, segment_length_m, _ = chosen_neighbor
+        traversed_edges.add((min(current_node_id, next_node_id), max(current_node_id, next_node_id)))
+        route_node_ids.append(next_node_id)
+        traversed_length_m += segment_length_m
+        recent_nodes.append(next_node_id)
+        if len(recent_nodes) > 6:
+            recent_nodes = recent_nodes[-6:]
+
+        if traversed_length_m >= target_length_m and len(route_node_ids) >= 10:
+            break
+
+    if len(route_node_ids) < 2:
+        return []
+
+    round_trip_ids = route_node_ids + list(reversed(route_node_ids[:-1]))
+    route_xy: List[XY] = []
+    for node_id in round_trip_ids:
+        node_xy = nodes_xy.get(node_id)
+        if node_xy is None:
+            continue
+        if not route_xy or _distance_xy(route_xy[-1], node_xy) > 8.0:
+            route_xy.append(node_xy)
+
+    if len(route_xy) < 2:
+        return []
+    if sum(_polyline_segment_lengths(route_xy)) < 180.0:
+        return []
+    return route_xy
+
+
 def _region_sampling_shapes() -> List[Dict[str, object]]:
     signature = _coverage_signature()
     if _REGION_SAMPLE_CACHE["signature"] == signature:
@@ -465,6 +1121,61 @@ def _region_sampling_shapes() -> List[Dict[str, object]]:
     return shapes
 
 
+def _heat_anchor_points_xy(spacing_m: float = HEAT_GRID_SPACING_M) -> List[XY]:
+    signature = _coverage_signature()
+    if (
+        _HEAT_GRID_CACHE["signature"] == signature
+        and _HEAT_GRID_CACHE["spacing_m"] == spacing_m
+    ):
+        return _HEAT_GRID_CACHE["points_xy"]  # type: ignore[return-value]
+
+    neighborhood_shapes = _build_neighborhood_shapes()
+    polygons: List[Tuple[Sequence[XY], BBox]] = [
+        (shape["polygon_xy"], shape["bbox"])
+        for shape in neighborhood_shapes
+        if isinstance(shape.get("polygon_xy"), list) and isinstance(shape.get("bbox"), tuple)
+    ]
+
+    if not polygons:
+        polygons = [
+            (shape["polygon_xy"], shape["bbox"])
+            for shape in _region_sampling_shapes()
+            if isinstance(shape.get("polygon_xy"), list) and isinstance(shape.get("bbox"), tuple)
+        ]
+
+    points_xy: List[XY] = []
+    seen_cells = set()
+    for polygon_xy, bbox in polygons:
+        if len(polygon_xy) < 3:
+            continue
+
+        min_x = math.floor(bbox[0] / spacing_m) * spacing_m
+        max_x = math.ceil(bbox[2] / spacing_m) * spacing_m
+        min_y = math.floor(bbox[1] / spacing_m) * spacing_m
+        max_y = math.ceil(bbox[3] / spacing_m) * spacing_m
+
+        x = min_x
+        while x <= max_x + EPSILON:
+            y = min_y
+            while y <= max_y + EPSILON:
+                point_xy = (x, y)
+                if _point_in_polygon(point_xy, polygon_xy):
+                    key = (int(round(x)), int(round(y)))
+                    if key not in seen_cells:
+                        seen_cells.add(key)
+                        points_xy.append(point_xy)
+                y += spacing_m
+            x += spacing_m
+
+    if not points_xy:
+        points_xy = [(0.0, 0.0)]
+
+    _HEAT_GRID_CACHE["signature"] = signature
+    _HEAT_GRID_CACHE["spacing_m"] = spacing_m
+    _HEAT_GRID_CACHE["points_xy"] = points_xy
+    return points_xy
+
+
 def _random_city_point_latlng(scan_key: int, index: int) -> LatLng:
     shapes = _region_sampling_shapes()
     if not shapes:
@@ -484,31 +1195,81 @@ def _random_city_point_latlng(scan_key: int, index: int) -> LatLng:
     return _xy_to_latlng(point_xy[0], point_xy[1], MONTREAL_REF_LAT, MONTREAL_REF_LNG)
 
 
-def _build_patrol_route_xy(coverage_polygon_xy: Sequence[XY], drone_id: str) -> List[XY]:
+def _build_patrol_route_fallback_xy(
+    coverage_polygon_xy: Sequence[XY],
+    drone_id: str,
+    preferred_center_xy: Optional[XY] = None,
+) -> List[XY]:
     if len(coverage_polygon_xy) < 3:
         return list(coverage_polygon_xy)
 
-    midpoints: List[XY] = []
-    for index, current in enumerate(coverage_polygon_xy):
-        nxt = coverage_polygon_xy[(index + 1) % len(coverage_polygon_xy)]
-        midpoints.append(((current[0] + nxt[0]) / 2.0, (current[1] + nxt[1]) / 2.0))
+    def _clamp_point_toward_inside(origin: XY, target: XY) -> XY:
+        if _point_in_polygon(target, coverage_polygon_xy):
+            return target
 
-    center = _centroid_xy(coverage_polygon_xy)
+        best = origin
+        low = 0.0
+        high = 1.0
+        for _ in range(28):
+            ratio = (low + high) / 2.0
+            candidate = (
+                origin[0] + ((target[0] - origin[0]) * ratio),
+                origin[1] + ((target[1] - origin[1]) * ratio),
+            )
+            if _point_in_polygon(candidate, coverage_polygon_xy):
+                best = candidate
+                low = ratio
+            else:
+                high = ratio
+        return best
+
     rng = _seeded_rng("road-route", drone_id)
-    center_jitter = (
-        center[0] + rng.uniform(-180.0, 180.0),
-        center[1] + rng.uniform(-180.0, 180.0),
+    bbox = _bbox_for_points(coverage_polygon_xy)
+    center = preferred_center_xy
+    if center is None or not _point_in_polygon(center, coverage_polygon_xy):
+        center = _sample_point_in_polygon_xy(coverage_polygon_xy, bbox, rng)
+
+    width = max(0.0, bbox[2] - bbox[0])
+    height = max(0.0, bbox[3] - bbox[1])
+    dx = max(65.0, min(260.0, (width * 0.24) * rng.uniform(0.9, 1.15)))
+    dy = max(65.0, min(260.0, (height * 0.24) * rng.uniform(0.9, 1.15)))
+
+    corners = [
+        _clamp_point_toward_inside(center, (center[0] - dx, center[1] - dy)),
+        _clamp_point_toward_inside(center, (center[0] + dx, center[1] - dy)),
+        _clamp_point_toward_inside(center, (center[0] + dx, center[1] + dy)),
+        _clamp_point_toward_inside(center, (center[0] - dx, center[1] + dy)),
+    ]
+
+    route: List[XY] = []
+    for point in corners + [corners[0]]:
+        if not route or _distance_xy(route[-1], point) > 24.0:
+            route.append(point)
+
+    if len(route) >= 4 and sum(_polyline_segment_lengths(route)) > 180.0:
+        return route
+
+    fallback = list(coverage_polygon_xy) + [coverage_polygon_xy[0]]
+    return fallback if len(fallback) >= 3 else list(coverage_polygon_xy)
+
+
+def _build_patrol_route_xy(
+    coverage_polygon_xy: Sequence[XY],
+    drone_id: str,
+    preferred_center_xy: Optional[XY] = None,
+) -> List[XY]:
+    route_xy = _build_patrol_route_from_osm_xy(
+        coverage_polygon_xy=coverage_polygon_xy,
+        drone_id=drone_id,
+        preferred_center_xy=preferred_center_xy,
     )
-    hub = center_jitter if _point_in_polygon(center_jitter, coverage_polygon_xy) else center
-
-    if len(midpoints) >= 6:
-        start_index = rng.randrange(len(midpoints))
-        first = midpoints[start_index]
-        second = midpoints[(start_index + 2) % len(midpoints)]
-        third = midpoints[(start_index + 4) % len(midpoints)]
-        return [first, hub, second, hub, third, hub, first]
-
-    return [midpoints[0], hub, midpoints[len(midpoints) // 2], hub, midpoints[0]]
+    if route_xy:
+        return route_xy
+    return _build_patrol_route_fallback_xy(
+        coverage_polygon_xy=coverage_polygon_xy,
+        drone_id=drone_id,
+        preferred_center_xy=preferred_center_xy,
+    )
 
 
 def _polyline_segment_lengths(points_xy: Sequence[XY]) -> List[float]:
@@ -568,9 +1329,14 @@ def _drone_public_view(drone_state: Dict[str, object]) -> Dict[str, object]:
     }
 
 
-def _initialize_drone_simulation(signature: Tuple[int, int]) -> None:
+def _initialize_drone_simulation(signature: Tuple[int, int, int]) -> None:
     cells = _generate_hex_cells()
     now_s = datetime.now(timezone.utc).timestamp()
+    neighborhood_shapes = _build_neighborhood_shapes()
+    shapes_by_name: Dict[str, List[Dict[str, object]]] = {}
+    for shape in neighborhood_shapes:
+        name = str(shape["name"])
+        shapes_by_name.setdefault(name, []).append(shape)
 
     sim_drones: List[Dict[str, object]] = []
     for index, cell in enumerate(cells, start=1):
@@ -580,7 +1346,27 @@ def _initialize_drone_simulation(signature: Tuple[int, int]) -> None:
             _latlng_to_xy(lat, lng, MONTREAL_REF_LAT, MONTREAL_REF_LNG)
             for lat, lng in coverage_polygon_latlng
         ]
-        route_xy = _build_patrol_route_xy(coverage_polygon_xy, drone_id)
+        center_lat, center_lng = cell["center_latlng"]
+        center_xy = _latlng_to_xy(center_lat, center_lng, MONTREAL_REF_LAT, MONTREAL_REF_LNG)
+        route_polygon_xy = coverage_polygon_xy
+        neighborhood_name = str(cell["neighborhood"])
+        named_shapes = shapes_by_name.get(neighborhood_name, [])
+        if named_shapes:
+            containing_shape = next(
+                (shape for shape in named_shapes if _point_in_polygon(center_xy, shape["polygon_xy"])),
+                None,
+            )
+            selected_shape = containing_shape or min(
+                named_shapes,
+                key=lambda shape: _distance_xy(center_xy, shape["centroid_xy"]),
+            )
+            route_polygon_xy = selected_shape["polygon_xy"]
+
+        route_xy = _build_patrol_route_xy(
+            route_polygon_xy,
+            drone_id,
+            preferred_center_xy=center_xy,
+        )
         segment_lengths = _polyline_segment_lengths(route_xy)
         route_length_m = sum(segment_lengths)
 
@@ -738,6 +1524,30 @@ def _geometry_centroid(geometry: Dict[str, object]) -> LatLng:
     return lat, lng
 
 
+def _point_on_drone_road_route(drone: Dict[str, object], index: int, scan_key: int) -> LatLng:
+    route = drone.get("road_route", [])
+    route_xy: List[XY] = []
+    if isinstance(route, list):
+        for point in route:
+            if not isinstance(point, (list, tuple)) or len(point) < 2:
+                continue
+            lat = float(point[0])
+            lng = float(point[1])
+            route_xy.append(_latlng_to_xy(lat, lng, MONTREAL_REF_LAT, MONTREAL_REF_LNG))
+
+    if len(route_xy) >= 2:
+        segment_lengths = _polyline_segment_lengths(route_xy)
+        route_length_m = sum(segment_lengths)
+        if route_length_m > EPSILON:
+            drone_id = str(drone.get("id", "unknown"))
+            rng = _seeded_rng("pothole-route-point", drone_id, index, scan_key)
+            distance_m = rng.uniform(0.0, route_length_m)
+            point_xy = _point_along_polyline(route_xy, segment_lengths, distance_m)
+            return _xy_to_latlng(point_xy[0], point_xy[1], MONTREAL_REF_LAT, MONTREAL_REF_LNG)
+
+    return float(drone["lat"]), float(drone["lng"])
+
+
 def _geometry_for_drone(drone: Dict[str, object], index: int, scan_key: int) -> Dict[str, object]:
     lat = float(drone["lat"])
     lng = float(drone["lng"])
@@ -777,7 +1587,7 @@ def _geometry_for_drone(drone: Dict[str, object], index: int, scan_key: int) -> 
         ring.append(ring[0])
         return {"type": "Polygon", "coordinates": [ring]}
 
-    random_lat, random_lng = _random_city_point_latlng(scan_key, index)
+    random_lat, random_lng = _point_on_drone_road_route(drone, index, scan_key)
     return {
         "type": "Point",
         "coordinates": [round(random_lng, 6), round(random_lat, 6)],
@@ -1191,6 +2001,7 @@ def get_heatmap_points(
     normalized_mode = (mode or "density").strip().lower()
     defects = get_defects(borough=borough, team=team, change_scope=change_scope)
     points: List[List[float]] = []
+    weighted_samples_xy: List[Tuple[XY, float]] = []
 
     for defect in defects:
         samples = _geometry_samples_for_heatmap(defect["geometry"])
@@ -1199,15 +2010,40 @@ def get_heatmap_points(
 
         severity_weight = SEVERITY_WEIGHTS.get(str(defect["severity"]), 1.0)
         risk_score = float(defect["risk_score"])
-        base_intensity = 0.38 + (severity_weight * 0.08)
+        base_intensity = 0.48 + (severity_weight * 0.10)
         if normalized_mode == "risk":
-            base_intensity = max(0.3, min(0.99, risk_score / 5.2))
+            base_intensity = max(0.4, min(0.99, risk_score / 4.4))
         else:
-            base_intensity = min(0.92, base_intensity)
+            base_intensity = min(0.96, base_intensity)
 
         for sample_index, (lat, lng) in enumerate(samples):
-            intensity = max(0.2, base_intensity - (sample_index * 0.04))
+            intensity = max(0.3, base_intensity - (sample_index * 0.03))
             points.append([round(lat, 6), round(lng, 6), round(min(intensity, 0.99), 2)])
+            sample_xy = _latlng_to_xy(lat, lng, MONTREAL_REF_LAT, MONTREAL_REF_LNG)
+            weighted_samples_xy.append((sample_xy, min(intensity, 0.99)))
+
+    sigma_m = HEAT_SIGMA_M_RISK if normalized_mode == "risk" else HEAT_SIGMA_M_DENSITY
+    sigma_sq = sigma_m * sigma_m
+    decay_cutoff_m = sigma_m * 3.0
+    background_intensity = (
+        HEAT_BASE_INTENSITY_RISK if normalized_mode == "risk" else HEAT_BASE_INTENSITY_DENSITY
+    )
+    anchor_points_xy = _heat_anchor_points_xy()
+
+    for anchor_xy in anchor_points_xy:
+        hotspot_sum = 0.0
+        if weighted_samples_xy:
+            for sample_xy, sample_intensity in weighted_samples_xy:
+                distance_m = _distance_xy(anchor_xy, sample_xy)
+                if distance_m > decay_cutoff_m:
+                    continue
+                contribution = sample_intensity * math.exp(-((distance_m * distance_m) / (2.0 * sigma_sq)))
+                hotspot_sum += contribution
+
+        hotspot_component = min(0.86, hotspot_sum * 0.78)
+        final_intensity = max(0.32, min(0.99, background_intensity + hotspot_component))
+        lat, lng = _xy_to_latlng(anchor_xy[0], anchor_xy[1], MONTREAL_REF_LAT, MONTREAL_REF_LNG)
+        points.append([round(lat, 6), round(lng, 6), round(final_intensity, 2)])
 
     return points
 

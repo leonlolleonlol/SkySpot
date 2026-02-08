@@ -10,6 +10,10 @@ SkySpot is a Flask + Leaflet operations map for road-defect monitoring.
 - Heatmaps:
   - Density mode
   - Risk-weighted mode
+- True street-centerline drone routing:
+  - Uses `data/roads.geojson` if present (preferred local source)
+  - Otherwise uses cached Overpass roads at `data/montreal_roads_overpass.json`
+  - Falls back to synthetic patrol loops when no road source is available
 - Change-over-time view:
   - New / worsened / stable / improved counts
   - Current scan vs previous scan timestamps
@@ -36,6 +40,8 @@ frontend/
 data/
   neighborhoods.json
   montreal_boundary.geojson
+  roads.geojson (optional)
+  montreal_roads_overpass.json (auto-created cache, optional)
 ```
 
 ## Run locally
@@ -52,6 +58,11 @@ python backend/app.py
 
 3. Open:
 `http://127.0.0.1:5000`
+
+Notes:
+- For true OSM centerline routing without internet, place a local road centerline file at `data/roads.geojson` (`LineString`/`MultiLineString` GeoJSON).
+- To allow live Overpass download/caching, set `SKYSPOT_ENABLE_OVERPASS=1` before starting the backend.
+- If Overpass download is disabled, the backend uses `data/roads.geojson` or `data/montreal_roads_overpass.json` when available, then falls back to synthetic routes.
 
 ## Key API endpoints
 
