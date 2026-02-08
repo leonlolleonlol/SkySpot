@@ -4,6 +4,7 @@ const DEFAULT_COVERAGE_RADIUS_M = Math.sqrt((DRONE_COVERAGE_AREA_KM2 * 1_000_000
 const DATA_REFRESH_MS = 5000;
 const EARTH_RADIUS_M = 6_371_000;
 const REF_LAT_RAD = (45.5017 * Math.PI) / 180;
+const MOBILE_LAYOUT_QUERY = "(max-width: 960px)";
 
 const map = L.map("map").setView([45.5017, -73.5673], 11);
 L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
@@ -90,6 +91,9 @@ const exportGeoJsonEl = document.getElementById("exportGeoJson");
 const exportCsvEl = document.getElementById("exportCsv");
 const wmsLikeUrlEl = document.getElementById("wmsLikeUrl");
 const copyWmsUrlBtn = document.getElementById("copyWmsUrl");
+const mobileMapToggleBtn = document.getElementById("mobileMapToggle");
+const mobileLayoutMedia = window.matchMedia(MOBILE_LAYOUT_QUERY);
+let mobileMapOnly = false;
 
 function setStatus(message) {
   statusEl.textContent = message;
@@ -162,6 +166,27 @@ function updateLayerModeText() {
     `Defects ${state.defectsVisible ? "On" : "Off"}`,
     `Heat ${heatLabel}`
   ].join(" | ");
+}
+
+function updateMobileMapToggleUi() {
+  if (!mobileMapToggleBtn) {
+    return;
+  }
+  const enabled = mobileLayoutMedia.matches && mobileMapOnly;
+  mobileMapToggleBtn.textContent = enabled ? "Show Panel" : "Map Only";
+  mobileMapToggleBtn.setAttribute("aria-pressed", enabled ? "true" : "false");
+}
+
+function applyMobileMapOnlyMode() {
+  if (mobileLayoutMedia.matches && mobileMapOnly) {
+    document.body.classList.add("mobile-map-only");
+  } else {
+    document.body.classList.remove("mobile-map-only");
+  }
+  updateMobileMapToggleUi();
+  window.requestAnimationFrame(() => {
+    map.invalidateSize();
+  });
 }
 
 function applyLayerVisibility() {
@@ -936,7 +961,28 @@ copyWmsUrlBtn.addEventListener("click", async () => {
   }
 });
 
+if (mobileMapToggleBtn) {
+  mobileMapToggleBtn.addEventListener("click", () => {
+    mobileMapOnly = !mobileMapOnly;
+    applyMobileMapOnlyMode();
+  });
+}
+
+const onMobileLayoutChange = () => {
+  if (!mobileLayoutMedia.matches) {
+    mobileMapOnly = false;
+  }
+  applyMobileMapOnlyMode();
+};
+
+if (typeof mobileLayoutMedia.addEventListener === "function") {
+  mobileLayoutMedia.addEventListener("change", onMobileLayoutChange);
+} else if (typeof mobileLayoutMedia.addListener === "function") {
+  mobileLayoutMedia.addListener(onMobileLayoutChange);
+}
+
 updateLayerModeText();
+applyMobileMapOnlyMode();
 window.requestAnimationFrame(animateDrones);
 loadData();
 setInterval(loadData, DATA_REFRESH_MS);
